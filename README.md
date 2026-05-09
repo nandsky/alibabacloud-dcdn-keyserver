@@ -15,7 +15,6 @@ $ git submodule update --init
 $ patch -p1 -d deps/nginx_tcp_proxy_module/ < tcp_module_compile_fixed.patch
 $ patch -p1 -d deps/nginx_tcp_proxy_module/ < tcp_lurk_keepalive.patch
 $ patch -p1 -d deps/nginx_tcp_proxy_module/ < tcp_access_log_format.patch
-$ patch -p1 -d deps/OpenSSL_1_1_1-stable/ < lurk_openssl_1_1_1-stable.patch
 
 $ wget 'https://nginx.org/download/nginx-1.26.2.tar.gz'
 $ tar -xzvf nginx-1.26.2.tar.gz
@@ -24,7 +23,7 @@ $ patch -p1 -d nginx-1.26.2 < deps/nginx_tcp_proxy_module/tcp.patch
 $ cd nginx-1.26.2
 $ ./configure \
     --with-http_ssl_module \
-    --with-openssl=../deps/OpenSSL_1_1_1-stable \
+    --with-openssl=../deps/boringssl \
     --add-module=../deps/nginx_tcp_proxy_module \
     --add-module=.. \
     --with-cc-opt="-Wno-implicit-fallthrough"

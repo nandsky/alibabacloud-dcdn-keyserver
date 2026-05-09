@@ -11,9 +11,16 @@
 #include <openssl/ssl.h>
 #include <openssl/md5.h>
 #include <openssl/kdf.h>
+#include <openssl/tls_prf.h>
 
 #include <ngx_tcp_lurk.h>
 
+#ifndef TLS_MD_MASTER_SECRET_CONST
+#define TLS_MD_MASTER_SECRET_CONST              "master secret"
+#define TLS_MD_MASTER_SECRET_CONST_SIZE         13
+#define TLS_MD_EXTENDED_MASTER_SECRET_CONST     "extended master secret"
+#define TLS_MD_EXTENDED_MASTER_SECRET_CONST_SIZE 22
+#endif
 
 #if defined(ngx_lurk_log_error)
 #undef ngx_lurk_log_error
@@ -137,7 +144,6 @@ typedef struct {
 
     ngx_str_t                 decrypt_res;
 
-    long                      master_prf;
     ngx_queue_t               http_body;
     ngx_uint_t                http_body_len;
 
@@ -292,7 +298,7 @@ ngx_uint_t      ngx_lurk_stat_count;
 static ngx_hash_t lurk_limit_keyid_runtime_tb;
 
 
-int ngx_tcp_lurk_tls1_prf_v2(long digest_mask,
+int ngx_tcp_lurk_tls1_prf_v2(const EVP_MD *md,
     const void *seed1, size_t seed1_len,
     const void *seed2, size_t seed2_len,
     const void *seed3, size_t seed3_len,
@@ -301,13 +307,15 @@ int ngx_tcp_lurk_tls1_prf_v2(long digest_mask,
     const unsigned char *sec, size_t slen,
     unsigned char *out, size_t olen, ngx_log_t *log);
 
+static const EVP_MD *ngx_tcp_lurk_get_prf_md(uint8_t prf);
+
 ngx_int_t ngx_tcp_lurk_prf(unsigned char *out, uint16_t version,
-    long master_prf, const void *client_random, int client_random_len,
+    uint8_t master_prf, const void *client_random, int client_random_len,
     const void *server_random, int server_random_len,
     const unsigned char *p, int len, ngx_log_t *log);
 
 ngx_int_t ngx_tcp_lurk_prf_ems(unsigned char *out, uint16_t version,
-    long master_prf, const void *client_random, int client_random_len,
+    uint8_t master_prf, const void *client_random, int client_random_len,
     const void *server_random, int server_random_len,
     const void *session_hash, int hashlen,
     const unsigned char *p, int len, ngx_log_t *log);
@@ -726,111 +734,24 @@ ngx_tcp_lurk_rsa_pms_padding(unsigned char *rsa_decrypt,
 }
 
 
-# define SSL_MD_MD5_IDX         0
-# define SSL_MD_SHA1_IDX        1
-# define SSL_MD_GOST94_IDX      2
-# define SSL_MD_GOST89MAC_IDX   3
-# define SSL_MD_SHA256_IDX      4
-# define SSL_MD_SHA384_IDX      5
-# define SSL_MD_GOST12_256_IDX  6
-# define SSL_MD_GOST89MAC12_IDX 7
-# define SSL_MD_GOST12_512_IDX  8
-# define SSL_MD_MD5_SHA1_IDX    9
-# define SSL_MD_SHA224_IDX     10
-# define SSL_MD_SHA512_IDX     11
-# define SSL_MAX_DIGEST        12
-
-
-/*
- * When adding new digest in the ssl_ciph.c and increment SSL_MD_NUM_IDX make
- * sure to update this constant too
- */
-
-/* Bits for algorithm2 (handshake digests and other extra flags) */
-
-/* Bits 0-7 are handshake MAC */
-# define SSL_HANDSHAKE_MAC_MASK  0xFF
-# define SSL_HANDSHAKE_MAC_MD5        0
-# define SSL_HANDSHAKE_MAC_SHA        0
-# define SSL_HANDSHAKE_MAC_MD5_SHA1   SSL_MD_MD5_SHA1_IDX
-# define SSL_HANDSHAKE_MAC_SHA256     SSL_MD_SHA256_IDX
-# define SSL_HANDSHAKE_MAC_SHA384     SSL_MD_SHA384_IDX
-# define SSL_HANDSHAKE_MAC_GOST94     SSL_MD_GOST94_IDX
-# define SSL_HANDSHAKE_MAC_GOST12_256 SSL_MD_GOST12_256_IDX
-# define SSL_HANDSHAKE_MAC_GOST12_512 SSL_MD_GOST12_512_IDX
-#define SSL_HANDSHAKE_MAC_SHA224      SSL_MD_SHA224_IDX
-#define SSL_HANDSHAKE_MAC_SHA512      SSL_MD_SHA512_IDX
-
-# define SSL_HANDSHAKE_MAC_DEFAULT    SSL_HANDSHAKE_MAC_MD5_SHA1
-
-/* Bits 8-15 bits are PRF */
-# define TLS1_PRF_DGST_SHIFT 8
-# define TLS1_PRF_SHA1_MD5   (SSL_MD_MD5_SHA1_IDX << TLS1_PRF_DGST_SHIFT)
-# define TLS1_PRF_SHA256     (SSL_MD_SHA256_IDX << TLS1_PRF_DGST_SHIFT)
-# define TLS1_PRF_SHA384     (SSL_MD_SHA384_IDX << TLS1_PRF_DGST_SHIFT)
-# define TLS1_PRF_GOST94     (SSL_MD_GOST94_IDX << TLS1_PRF_DGST_SHIFT)
-# define TLS1_PRF_GOST12_256 (SSL_MD_GOST12_256_IDX << TLS1_PRF_DGST_SHIFT)
-# define TLS1_PRF_GOST12_512 (SSL_MD_GOST12_512_IDX << TLS1_PRF_DGST_SHIFT)
-# define TLS1_PRF            (SSL_MD_MD5_SHA1_IDX << TLS1_PRF_DGST_SHIFT)
-
-
-#define SSL_MD_NUM_IDX  SSL_MAX_DIGEST
-static const EVP_MD *ssl_digest_methods[SSL_MD_NUM_IDX] = {
-    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
-};
-
-static int ssl_handshake_digest_flag[SSL_MD_NUM_IDX] = {
-    SSL_HANDSHAKE_MAC_MD5, SSL_HANDSHAKE_MAC_SHA,
-    SSL_HANDSHAKE_MAC_GOST94, 0, SSL_HANDSHAKE_MAC_SHA256,
-    SSL_HANDSHAKE_MAC_SHA384, 0, 0, 0, SSL_HANDSHAKE_MAC_MD5_SHA1,
-    SSL_HANDSHAKE_MAC_SHA224, SSL_HANDSHAKE_MAC_SHA512
-};
-
-
-void
-ngx_tcp_lurk_load_ssl_method(void)
+static const EVP_MD *
+ngx_tcp_lurk_get_prf_md(uint8_t prf)
 {
-    ssl_digest_methods[SSL_MD_MD5_IDX] = EVP_get_digestbyname(SN_md5);
-    ssl_digest_methods[SSL_MD_SHA1_IDX] = EVP_get_digestbyname(SN_sha1);
-    ssl_digest_methods[SSL_MD_GOST94_IDX] =
-                                EVP_get_digestbyname(SN_id_GostR3411_94);
-    ssl_digest_methods[SSL_MD_GOST89MAC_IDX] =
-                                EVP_get_digestbyname(SN_id_Gost28147_89_MAC);
-    ssl_digest_methods[SSL_MD_SHA256_IDX] = EVP_get_digestbyname(SN_sha256);
-    ssl_digest_methods[SSL_MD_SHA384_IDX] = EVP_get_digestbyname(SN_sha384);
-
-#if defined(NID_md5_sha1)
-    ssl_digest_methods[SSL_MD_MD5_SHA1_IDX] = EVP_md5_sha1();
-#endif
-#if defined(NID_sha224)
-    ssl_digest_methods[SSL_MD_SHA224_IDX] = EVP_sha224();
-#endif
-#if defined(NID_sha512)
-    ssl_digest_methods[SSL_MD_SHA512_IDX] = EVP_sha512();
-#endif
-}
-
-
-static int
-ssl_get_handshake_digest(int idx, long *mask, const EVP_MD **md)
-{
-    if (idx < 0 || idx >= SSL_MD_NUM_IDX) {
-        return 0;
+    switch (prf) {
+    case NGX_LURK_TLS_PRF_SHA256:
+        return EVP_sha256();
+    case NGX_LURK_TLS_PRF_SHA384:
+        return EVP_sha384();
+    case NGX_LURK_TLS_PRF_MD5SHA1:
+        return EVP_md5_sha1();
+    default:
+        return NULL;
     }
-
-    *mask = ssl_handshake_digest_flag[idx];
-    if (*mask) {
-      *md = ssl_digest_methods[idx];
-    } else {
-      *md = NULL;
-    }
-
-    return 1;
 }
 
 
 /* seed1 through seed5 are concatenated */
-int ngx_tcp_lurk_tls1_prf_v2(long digest_mask,
+int ngx_tcp_lurk_tls1_prf_v2(const EVP_MD *md,
                     const void *seed1, size_t seed1_len,
                     const void *seed2, size_t seed2_len,
                     const void *seed3, size_t seed3_len,
@@ -839,55 +760,69 @@ int ngx_tcp_lurk_tls1_prf_v2(long digest_mask,
                     const unsigned char *sec, size_t slen,
                     unsigned char *out, size_t olen, ngx_log_t *log)
 {
-    const EVP_MD *md = NULL;
-    EVP_PKEY_CTX *pctx = NULL;
+    u_char  *seed_buf = NULL;
+    size_t   seed_len = 0;
+    int      ret = 0;
 
-    int   ret = 0;
-    long  m;
-
-    ssl_get_handshake_digest(digest_mask, &m, &md);
     if (md == NULL) {
-        /* Should never happen */
         ngx_log_error(NGX_LOG_ERR, log, 0,
-                      "[tcp lurk] ssl_get_handshake_digest failed");
+                      "[tcp lurk] prf md is null");
         return 0;
     }
-    pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_TLS1_PRF, NULL);
-    if (pctx == NULL || EVP_PKEY_derive_init(pctx) <= 0
-        || EVP_PKEY_CTX_set_tls1_prf_md(pctx, md) <= 0
-        || EVP_PKEY_CTX_set1_tls1_prf_secret(pctx, sec, (int)slen) <= 0)
-        goto err;
 
-    if (EVP_PKEY_CTX_add1_tls1_prf_seed(pctx, seed1, (int)seed1_len) <= 0)
-        goto err;
-    if (EVP_PKEY_CTX_add1_tls1_prf_seed(pctx, seed2, (int)seed2_len) <= 0)
-        goto err;
-    if (EVP_PKEY_CTX_add1_tls1_prf_seed(pctx, seed3, (int)seed3_len) <= 0)
-        goto err;
-    if (EVP_PKEY_CTX_add1_tls1_prf_seed(pctx, seed4, (int)seed4_len) <= 0)
-        goto err;
-    if (EVP_PKEY_CTX_add1_tls1_prf_seed(pctx, seed5, (int)seed5_len) <= 0)
-        goto err;
+    seed_len = seed2_len + seed3_len + seed4_len + seed5_len;
+    if (seed_len > 0) {
+        seed_buf = ngx_alloc(seed_len, log);
+        if (seed_buf == NULL) {
+            return 0;
+        }
+        size_t pos = 0;
+        if (seed2_len > 0) {
+            ngx_memcpy(seed_buf + pos, seed2, seed2_len);
+            pos += seed2_len;
+        }
+        if (seed3_len > 0) {
+            ngx_memcpy(seed_buf + pos, seed3, seed3_len);
+            pos += seed3_len;
+        }
+        if (seed4_len > 0) {
+            ngx_memcpy(seed_buf + pos, seed4, seed4_len);
+            pos += seed4_len;
+        }
+        if (seed5_len > 0) {
+            ngx_memcpy(seed_buf + pos, seed5, seed5_len);
+            pos += seed5_len;
+        }
+    }
 
-    if (EVP_PKEY_derive(pctx, out, &olen) <= 0)
-        goto err;
-    ret = 1;
+    ret = CRYPTO_tls1_prf(md, out, olen, sec, slen,
+                          seed1, seed1_len,
+                          seed_buf, seed_len,
+                          NULL, 0);
 
- err:
-    EVP_PKEY_CTX_free(pctx);
+    if (seed_buf != NULL) {
+        ngx_free(seed_buf);
+    }
+
     return ret;
 }
 
 
 ngx_int_t
-ngx_tcp_lurk_prf(unsigned char *out, uint16_t version, long master_prf,
+ngx_tcp_lurk_prf(unsigned char *out, uint16_t version, uint8_t master_prf,
     const void *client_random, int client_random_len,
     const void *server_random, int server_random_len,
     const unsigned char *p, int len, ngx_log_t *log)
 {
     int  rc;
+    const EVP_MD *md;
 
-    rc = ngx_tcp_lurk_tls1_prf_v2(master_prf,
+    md = ngx_tcp_lurk_get_prf_md(master_prf);
+    if (md == NULL) {
+        return NGX_ERROR;
+    }
+
+    rc = ngx_tcp_lurk_tls1_prf_v2(md,
                 TLS_MD_MASTER_SECRET_CONST, TLS_MD_MASTER_SECRET_CONST_SIZE,
                 client_random, client_random_len, NULL, 0,
                 server_random, server_random_len, NULL, 0,
@@ -942,15 +877,21 @@ ngx_tcp_lurk_get_common_name(SSL *ssl, char *cn, size_t size)
 
 
 ngx_int_t ngx_tcp_lurk_prf_ems(unsigned char *out, uint16_t version,
-    long master_prf, const void *client_random, int client_random_len,
+    uint8_t master_prf, const void *client_random, int client_random_len,
     const void *server_random, int server_random_len,
     const void *session_hash, int hashlen,
     const unsigned char *p, int len, ngx_log_t *log)
 {
     int  rc;
+    const EVP_MD *md;
+
+    md = ngx_tcp_lurk_get_prf_md(master_prf);
+    if (md == NULL) {
+        return NGX_ERROR;
+    }
 
     if(version > SSL3_VERSION && version < TLS1_3_VERSION){
-        rc = ngx_tcp_lurk_tls1_prf_v2(master_prf,
+        rc = ngx_tcp_lurk_tls1_prf_v2(md,
                 TLS_MD_EXTENDED_MASTER_SECRET_CONST,
                 TLS_MD_EXTENDED_MASTER_SECRET_CONST_SIZE,
                 session_hash, hashlen,
@@ -1862,8 +1803,10 @@ ngx_tcp_lurk_parse_request(ngx_tcp_session_t *s)
 static ngx_int_t
 ngx_tcp_lurk_get_pkey_id(EVP_PKEY *pkey, uint8_t *key_id)
 {
-    char            *hex;
     RSA             *rsa;
+    char            *hex;
+    size_t           hex_len;
+    u_char          *p;
     EC_KEY          *ec_key;
     const EC_POINT  *ec_pub_key;
     const EC_GROUP  *group;
@@ -1885,6 +1828,12 @@ ngx_tcp_lurk_get_pkey_id(EVP_PKEY *pkey, uint8_t *key_id)
 
         hex = BN_bn2hex(n);
 
+        hex_len = ngx_strlen(hex);
+        for (p = (u_char *)hex; hex_len; hex_len--) {
+            *p = ngx_toupper(*p);
+            p++;
+        }
+
         break;
     case EVP_PKEY_EC:
         ec_key = EVP_PKEY_get1_EC_KEY(pkey);
@@ -1902,8 +1851,30 @@ ngx_tcp_lurk_get_pkey_id(EVP_PKEY *pkey, uint8_t *key_id)
             return NGX_ERROR;
         }
 
-        hex = EC_POINT_point2hex(group, ec_pub_key,
-                                 EC_KEY_get_conv_form(ec_key), NULL);
+        {
+            uint8_t *buf = NULL;
+            size_t   buf_len;
+            size_t   i;
+
+            buf_len = EC_POINT_point2buf(group, ec_pub_key,
+                                         EC_KEY_get_conv_form(ec_key), &buf, NULL);
+            if (buf_len == 0) {
+                return NGX_ERROR;
+            }
+
+            hex = OPENSSL_malloc(buf_len * 2 + 1);
+            if (hex == NULL) {
+                OPENSSL_free(buf);
+                return NGX_ERROR;
+            }
+
+            for (i = 0; i < buf_len; i++) {
+                ngx_snprintf((u_char *)hex + i * 2, 3, "%02X", buf[i]);
+            }
+            hex[buf_len * 2] = '\0';
+
+            OPENSSL_free(buf);
+        }
 
         break;
     default:
@@ -2030,7 +2001,6 @@ ngx_tcp_lurk_buf_init(ngx_tcp_session_t *s)
 static ngx_int_t
 ngx_tcp_lurk_rsa_master(ngx_tcp_session_t *s)
 {
-    long                                      master_prf;
     int                                       error = 0;
     size_t                                    i;
     BN_CTX                                   *bn_ctx;
@@ -2088,17 +2058,10 @@ ngx_tcp_lurk_rsa_master(ngx_tcp_session_t *s)
         }
     }
 
-    switch (rsa->master_prf) {
-    case NGX_LURK_TLS_PRF_SHA256:
-        master_prf = SSL_HANDSHAKE_MAC_SHA256;
-        break;
-    case NGX_LURK_TLS_PRF_SHA384:
-        master_prf = SSL_HANDSHAKE_MAC_SHA384;
-        break;
-    case NGX_LURK_TLS_PRF_MD5SHA1:
-        master_prf = SSL_HANDSHAKE_MAC_DEFAULT;
-        break;
-    default:
+    if (rsa->master_prf != NGX_LURK_TLS_PRF_SHA256
+        && rsa->master_prf != NGX_LURK_TLS_PRF_SHA384
+        && rsa->master_prf != NGX_LURK_TLS_PRF_MD5SHA1)
+    {
         ctx->err = NGX_LURK_RESPONSE_UNVALID_PRF;
         (void) ngx_atomic_fetch_add(ngx_lurk_fail_master_secret, 1);
         ngx_lurk_log_error(NGX_LOG_ERR, s->connection->log, 0,
@@ -2125,7 +2088,6 @@ ngx_tcp_lurk_rsa_master(ngx_tcp_session_t *s)
         (void)ngx_ssl_lurk_decrypt(&key_str, &enpms, &enpms);
     }
 
-    ctx->master_prf = master_prf;
     ctx->rsa = rsa;
     ctx->ems_rsa = NULL;
 
@@ -2159,7 +2121,7 @@ ngx_tcp_lurk_rsa_master(ngx_tcp_session_t *s)
     pkey_type = EVP_PKEY_id(pkey);
     if (pkey_type == EVP_PKEY_RSA) {
         ret = RSA_private_decrypt(enpms.len, enpms.data, decrypt_res.data,
-                                  EVP_PKEY_get0_RSA(pkey),
+                                  (RSA *)EVP_PKEY_get0_RSA(pkey),
                                   RSA_NO_PADDING);
 
         if (ret == -1 || ret > ctx->pkey_size) {
@@ -2191,7 +2153,7 @@ ngx_tcp_lurk_rsa_master(ngx_tcp_session_t *s)
         (void) ngx_atomic_fetch_add(ngx_lurk_pkey_rsa, 1);
 
     } else if (pkey_type == EVP_PKEY_EC) {
-        EC_KEY *ec = EVP_PKEY_get0_EC_KEY(pkey);
+        const EC_KEY *ec = EVP_PKEY_get0_EC_KEY(pkey);
         group = EC_KEY_get0_group(ec);
 
         ec_point = EC_POINT_new(group);
@@ -2250,7 +2212,7 @@ ngx_tcp_lurk_rsa_master(ngx_tcp_session_t *s)
     master_secret = &ctx->buf->body;
 
     if (ngx_tcp_lurk_prf(master_secret->pos, rsa->edge_server_version,
-                    master_prf, &rsa->client_random[0], SSL3_RANDOM_SIZE,
+                    rsa->master_prf, &rsa->client_random[0], SSL3_RANDOM_SIZE,
                     &rsa->edge_server_random[0], SSL3_RANDOM_SIZE,
                     decrypt_res.data, len, s->connection->log) != NGX_OK)
     {
@@ -2281,7 +2243,6 @@ ngx_tcp_lurk_rsa_master(ngx_tcp_session_t *s)
 static ngx_int_t
 ngx_tcp_lurk_rsa_extended_master(ngx_tcp_session_t *s)
 {
-    long                                        master_prf;
     int                                         error = 0;
     unsigned int                               i;
     BN_CTX                                     *bn_ctx;
@@ -2324,17 +2285,10 @@ ngx_tcp_lurk_rsa_extended_master(ngx_tcp_session_t *s)
         }
     }
 
-    switch (rsa->master_prf) {
-    case NGX_LURK_TLS_PRF_SHA256:
-        master_prf = SSL_HANDSHAKE_MAC_SHA256;
-        break;
-    case NGX_LURK_TLS_PRF_SHA384:
-        master_prf = SSL_HANDSHAKE_MAC_SHA384;
-        break;
-    case NGX_LURK_TLS_PRF_MD5SHA1:
-        master_prf = SSL_HANDSHAKE_MAC_DEFAULT;
-        break;
-    default:
+    if (rsa->master_prf != NGX_LURK_TLS_PRF_SHA256
+        && rsa->master_prf != NGX_LURK_TLS_PRF_SHA384
+        && rsa->master_prf != NGX_LURK_TLS_PRF_MD5SHA1)
+    {
         ctx->err = NGX_LURK_RESPONSE_UNVALID_PRF;
         return NGX_ERROR;
     }
@@ -2365,7 +2319,6 @@ ngx_tcp_lurk_rsa_extended_master(ngx_tcp_session_t *s)
         return NGX_ERROR;
     }
 
-    rsa->master_prf = master_prf;
     ctx->ems_rsa = rsa;
     ctx->rsa = NULL;
 
@@ -2424,7 +2377,7 @@ ngx_tcp_lurk_rsa_extended_master(ngx_tcp_session_t *s)
         (void) ngx_atomic_fetch_add(ngx_lurk_pkey_rsa, 1);
 
     } else if (pkey_type == EVP_PKEY_EC) {
-        EC_KEY *ec = EVP_PKEY_get0_EC_KEY(pkey);
+        const EC_KEY *ec = EVP_PKEY_get0_EC_KEY(pkey);
         group = EC_KEY_get0_group(ec);
 
         ec_point = EC_POINT_new(group);
@@ -2485,7 +2438,7 @@ ngx_tcp_lurk_rsa_extended_master(ngx_tcp_session_t *s)
     master_secret = &ctx->buf->body;
 
     if (ngx_tcp_lurk_prf_ems(master_secret->pos, rsa->edge_server_version,
-                    master_prf, &rsa->client_random[0], SSL3_RANDOM_SIZE,
+                    rsa->master_prf, &rsa->client_random[0], SSL3_RANDOM_SIZE,
                     &rsa->edge_server_random[0], SSL3_RANDOM_SIZE,
                     session_hash.data, session_hash.len,
                     decrypt_res.data, len, s->connection->log) != NGX_OK)
@@ -2588,7 +2541,7 @@ ngx_tcp_lurk_ecdhe(ngx_tcp_session_t *s)
     sig_id = ecdhe->signature_scheme & 0x00FF;
     md_id = (ecdhe->signature_scheme >> 8) & 0xFF;
 
-    EVP_MD_CTX_init(md_ctx);
+    /* EVP_MD_CTX_new() already initializes the context */
 
     if (ecdhe->signature_scheme == 0x0804 ||
         ecdhe->signature_scheme == 0x0805 ||
@@ -2626,7 +2579,7 @@ ngx_tcp_lurk_ecdhe(ngx_tcp_session_t *s)
 
         if (RSA_sign(NID_md5_sha1, md_buf, j,
                      sign, &sign_len,
-                     EVP_PKEY_get0_RSA(pkey)
+                     (RSA *)EVP_PKEY_get0_RSA(pkey)
                     ) <= 0)
         {
             ngx_lurk_log_error(NGX_LOG_ERR, s->connection->log, 0,
@@ -2767,11 +2720,101 @@ end:
 }
 
 
+static void
+tls1_lookup_get_sig_and_md(uint16_t sigalg, int *psig, const EVP_MD **pmd)
+{
+    const EVP_MD *md = NULL;
+    int           sig = -1;
+
+    switch (sigalg) {
+    case 0x0201:
+        sig = NID_rsaEncryption;
+        md = EVP_sha1();
+        break;
+    case 0x0203:
+        sig = NID_X9_62_id_ecPublicKey;
+        md = EVP_sha1();
+        break;
+    case 0x0401:
+        sig = NID_rsaEncryption;
+        md = EVP_sha256();
+        break;
+    case 0x0403:
+        sig = NID_X9_62_id_ecPublicKey;
+        md = EVP_sha256();
+        break;
+    case 0x0501:
+        sig = NID_rsaEncryption;
+        md = EVP_sha384();
+        break;
+    case 0x0503:
+        sig = NID_X9_62_id_ecPublicKey;
+        md = EVP_sha384();
+        break;
+    case 0x0601:
+        sig = NID_rsaEncryption;
+        md = EVP_sha512();
+        break;
+    case 0x0603:
+        sig = NID_X9_62_id_ecPublicKey;
+        md = EVP_sha512();
+        break;
+    case 0x0804:
+    case 0x0809:
+        sig = NID_rsassaPss;
+        md = EVP_sha256();
+        break;
+    case 0x0805:
+    case 0x080a:
+        sig = NID_rsassaPss;
+        md = EVP_sha384();
+        break;
+    case 0x0806:
+    case 0x080b:
+        sig = NID_rsassaPss;
+        md = EVP_sha512();
+        break;
+    case 0x0202:
+        sig = NID_dsa;
+        md = EVP_sha1();
+        break;
+    case 0x0402:
+        sig = NID_dsa;
+        md = EVP_sha256();
+        break;
+    case 0x0502:
+        sig = NID_dsa;
+        md = EVP_sha384();
+        break;
+    case 0x0602:
+        sig = NID_dsa;
+        md = EVP_sha512();
+        break;
+    case 0x0303:
+        sig = NID_ED25519;
+        md = NULL;
+        break;
+    case 0x0304:
+        sig = NID_ED448;
+        md = NULL;
+        break;
+    default:
+        break;
+    }
+
+    if (psig) {
+        *psig = sig;
+    }
+    if (pmd) {
+        *pmd = md;
+    }
+}
+
+
 static ngx_int_t
 ngx_tcp_lurk_cert_verify(ngx_tcp_session_t *s)
 {
     ngx_str_t                          hdata = ngx_null_string;
-    ngx_str_t                          master_key = ngx_null_string;
     ngx_str_t                          enc_str, key_str;
     ngx_str_t                          private_key_str;
     u_char                             *sig;
@@ -2821,13 +2864,6 @@ ngx_tcp_lurk_cert_verify(ngx_tcp_session_t *s)
     verfiy->signature_scheme = ntohs(verfiy->signature_scheme);
 
     pos = sizeof(ngx_lurk_tls_cert_verify_entity_t);
-
-    if (verfiy->version == SSL3_VERSION) {
-        master_key.len = *(uint16_t *)(ctx->payload.last + pos);
-        pos += sizeof(uint16_t);
-
-        master_key.data = (u_char *)(ctx->payload.last + pos);
-    }
 
     hdata.len = *(uint16_t *)(ctx->payload.last + pos);
     hdata.len = ntohs(hdata.len);
@@ -2880,18 +2916,15 @@ ngx_tcp_lurk_cert_verify(ngx_tcp_session_t *s)
     }
 
     if (verfiy->version == SSL3_VERSION) {
-        if (EVP_DigestSignUpdate(mctx, hdata.data, hdata.len) <= 0
-            || !EVP_MD_CTX_ctrl(mctx, EVP_CTRL_SSL3_MASTER_SECRET,
-                                master_key.len, master_key.data)
-            || EVP_DigestSignFinal(mctx, NULL, &siglen) <= 0
-            || EVP_DigestSignFinal(mctx, sig, &siglen) <= 0) {
-            ngx_lurk_log_error(NGX_LOG_ERR, s->connection->log, 0,
-                               "[sni:%V][client_ip:%V]digest fail error %s",
-                               &ctx->servername, &ctx->ip_text, ERR_error_string(ERR_peek_last_error(), NULL));
-            (void) ngx_atomic_fetch_add(ngx_lurk_fail_cert_verify, 1);
-            return NGX_ERROR;
-        }
-    } else if (EVP_DigestSign(mctx, sig, &siglen, hdata.data, hdata.len) <= 0) {
+        ctx->err = NGX_LURK_RESPONSE_UNVALID_TLS_VERSION;
+        ngx_lurk_log_error(NGX_LOG_ERR, s->connection->log, 0,
+                           "[sni:%V][client_ip:%V]SSLv3 cert verify not supported",
+                           &ctx->servername, &ctx->ip_text);
+        (void) ngx_atomic_fetch_add(ngx_lurk_fail_cert_verify, 1);
+        return NGX_ERROR;
+    }
+
+    if (EVP_DigestSign(mctx, sig, &siglen, hdata.data, hdata.len) <= 0) {
         ngx_lurk_log_error(NGX_LOG_ERR, s->connection->log, 0,
                            "[sni:%V][client_ip:%V]digest sign fail error %s",
                            &ctx->servername, &ctx->ip_text, ERR_error_string(ERR_peek_last_error(), NULL));
@@ -3273,7 +3306,7 @@ ngx_tcp_lurk_load_pkey(ngx_tree_ctx_t *ctx, ngx_str_t *name)
 
     pkey_type = EVP_PKEY_id(pkey);
     if (pkey_type == EVP_PKEY_RSA) {
-        RSA *rsa = EVP_PKEY_get0_RSA(pkey);
+        const RSA *rsa = EVP_PKEY_get0_RSA(pkey);
         if (RSA_check_key(rsa) != 1) {
             ngx_log_error(NGX_LOG_EMERG, ctx->log, 0,
                           "RSA private key broken: %V", name);
@@ -4016,7 +4049,5 @@ ngx_tcp_lurk_shm_find_key(ngx_rbtree_t *key_tree, const uint8_t *key_id)
 static ngx_int_t
 ngx_tcp_lurk_init_module(ngx_cycle_t *cf)
 {
-    ngx_tcp_lurk_load_ssl_method();
-
     return NGX_OK;
 }
