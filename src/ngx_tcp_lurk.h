@@ -97,11 +97,6 @@ typedef struct {
 
 
 typedef struct {
-    uint8_t                          master[48];
-} ngx_lurk_tls_master_payload_t;
-
-
-typedef struct {
     uint8_t                          client_random[32];
     uint8_t                          edge_server_random[32];
     uint16_t                         version;
@@ -144,17 +139,17 @@ typedef enum {
 } ngx_lurk_query_bit_t;
 
 
-typedef enum {
+enum {
     NGX_LURK_VERSION_MIN                                = 1,
     NGX_LURK_V1                                         = 1,
     NGX_LURK_V2                                         = 2,
     NGX_LURK_V3                                         = 3,
     NGX_LURK_V4                                         = 4,
     NGX_LURK_VERSION_MAX                                = 4,
-} ngx_lurk_version_t;
+};
 
 
-typedef enum {
+enum {
     NGX_LURK_QUERY_TYPE_PING                            = 0,
     NGX_LURK_QUERY_TYPE_CAP                             = 1,
     NGX_LURK_QUERY_TYPE_RSA_MASTER                      = 2,
@@ -163,10 +158,10 @@ typedef enum {
     NGX_LURK_QUERY_TYPE_ECDHE                           = 5,
     NGX_LURK_QUERY_TYPE_PFS_NON_PREDICTABLE_ECDHE       = 6,
     NGX_LURK_QUERY_TYPE_CERT_VERIFY                     = 7,
-} ngx_lurk_query_type_t;
+};
 
 
-typedef enum {
+enum {
     NGX_LURK_RESPONSE_SUCCESS                           = 0,
     NGX_LURK_RESPONSE_UNVALID_LURK_VERSION              = 1,
     NGX_LURK_RESPONSE_UNVALID_QUERY_TYPE                = 2,
@@ -178,22 +173,22 @@ typedef enum {
     NGX_LURK_RESPONSE_UNVALID_PAYLOAD_FORMAT            = 8,
     NGX_LURK_RESPONSE_ERROR_INTERNAL                    = 9,
     NGX_LURK_RESPONSE_ERROR_OVERWHELM                   = 10,
-} ngx_lurk_respone_status_t;
+};
 
 
-typedef enum {
+enum {
     NGX_LURK_KEY_PAIR_ID_TYPE_SHA256                    = 0,
-} ngx_lurk_key_pair_id_type_t;
+};
 
 
 #define NGX_LURK_KEY_PAIR_ID_SHA256_LEN                 32
 
 
 /* RFC5246 section 6.1 */
-typedef enum {
+enum {
     NGX_LURK_TLS_PRF_SHA256                             = 0,
     NGX_LURK_TLS_PRF_SHA384                             = 1,
     NGX_LURK_TLS_PRF_MD5SHA1                            = 2,
-} ngx_lurl_prf_algorithm_t;
+};
 
 #endif /* _NGX_TCP_LURK_H_INCLUDED_ */

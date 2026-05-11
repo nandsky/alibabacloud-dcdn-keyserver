@@ -30,15 +30,7 @@
     ngx_log_error(level, log, errno, "[tcp lurk][func:%s][line:%d][keyclient:%V]"fmt, \
             __func__, __LINE__, &s->connection->addr_text, ##args)
 
-#define NGX_ARRAY_LENGTH(array) (sizeof(array)/sizeof((array)[0]))
-#define NGX_TCP_LURK_REG_INTERVAL_MSEC  5000
-
-#define NGX_TCP_LURK_HTTP_HEADER_ACCEPT        "application/json"
-#define NGX_TCP_LURK_HTTP_HEADER_ACCEPT_LEN    sizeof(NGX_TCP_LURK_HTTP_HEADER_ACCEPT) - 1
-
 #define NGX_TCP_LURK_KEY_ID_LEN                32
-#define NGX_TCP_LURK_CATEGORY_MASK_MIN         0
-#define NGX_TCP_LURK_CATEGORY_MASK_MAX         1024
 
 #define NGX_TCP_LURK_HEALTH_REQ "GET /lurk.hck HTTP/"
 #define NGX_TCP_LURK_HEALTH_REQ_L (sizeof(NGX_TCP_LURK_HEALTH_REQ) - 1)
@@ -62,16 +54,6 @@
 #define NGX_TCP_LURK_FLAG_DONE                          0x01
 #define NGX_TCP_LURK_FLAG_PROCESSING                    0x02
 #define NGX_TCP_LURK_FLAG_RETRY                         0x03
-
-#define NGX_TCP_LURK_PHASE_START                        0
-#define NGX_TCP_LURK_PHASE_REGISTER                     1
-#define NGX_TCP_LURK_PHASE_READY                        2
-
-
-typedef struct {
-    ngx_queue_t               queue;
-    ngx_chain_t              *chain;
-} ngx_tcp_lurk_http_body_chain_t;
 
 
 typedef struct ngx_tcp_lurk_conf_s {
@@ -205,7 +187,6 @@ typedef struct {
     uint8_t                    key_id[NGX_TCP_LURK_KEY_ID_LEN];
 
     ngx_int_t                  refcnt;
-    uint8_t                    cat_mask[NGX_TCP_LURK_CATEGORY_MASK_MAX / 8];
     uint8_t                    key[0];
 } ngx_tcp_lurk_key_node_t;
 
@@ -320,7 +301,6 @@ ngx_int_t ngx_tcp_lurk_prf_ems(unsigned char *out, uint16_t version,
     const void *session_hash, int hashlen,
     const unsigned char *p, int len, ngx_log_t *log);
 
-static ngx_int_t ngx_tcp_lurk_init_module(ngx_cycle_t *cf);
 static void ngx_tcp_lurk_init_session(ngx_tcp_session_t *s);
 static char *ngx_tcp_lurk(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 static void ngx_tcp_lurk_read_handler(ngx_event_t *ev);
@@ -364,27 +344,6 @@ static u_char *ngx_tcp_lurk_get_error(ngx_tcp_session_t *s, u_char *buf,
     ngx_tcp_log_op_t *op);
 
 void ngx_tcp_lurk_shm_free_key_node(ngx_tcp_lurk_key_node_t *key_node);
-
-
-static inline int
-ngx_tcp_lurk_test_cat_mask(uint8_t *mask, int cat)
-{
-    return mask[cat / 8] & (1 << (cat % 8));
-}
-
-
-static inline void
-ngx_tcp_lurk_set_cat_mask(uint8_t *mask, int cat)
-{
-    mask[cat / 8] |= 1 << (cat % 8);
-}
-
-
-static inline void
-ngx_tcp_lurk_reset_cat_mask(uint8_t *mask, int cat)
-{
-    mask[cat / 8] &= ~(1 << (cat % 8));
-}
 
 
 static ngx_shm_t  stats_shm;
@@ -495,7 +454,7 @@ ngx_module_t  ngx_tcp_lurk_module = {
     ngx_tcp_lurk_commands,                 /* module directives */
     NGX_TCP_MODULE,                        /* module type */
     NULL,                                  /* init master */
-    ngx_tcp_lurk_init_module,              /* init module */
+    NULL,                                  /* init module */
     NULL,                                  /* init process */
     NULL,                                  /* init thread */
     NULL,                                  /* exit thread */
@@ -710,16 +669,6 @@ ngx_tcp_lurk_rsa_pms_padding(unsigned char *rsa_decrypt,
                                       (unsigned)(client_version >> 8));
     version_good &= constant_time_eq_8(rsa_decrypt[padding_len + 1],
                                        (unsigned)(client_version & 0xff));
-
-    if (0) {
-        unsigned char workaround_good;
-        workaround_good = constant_time_eq_8(rsa_decrypt[padding_len],
-                    (unsigned)(server_version >> 8));
-        workaround_good &=
-            constant_time_eq_8(rsa_decrypt[padding_len + 1],
-                        (unsigned)(server_version & 0xff));
-        version_good |= workaround_good;
-    }
 
     decrypt_good &= version_good;
 
@@ -2633,8 +2582,6 @@ ngx_tcp_lurk_ecdhe(ngx_tcp_session_t *s)
             return NGX_ERROR;
         }
 
-        //EVP_MD_CTX_init(md_ctx);
-
         if (rsa_pss) {
             if (EVP_DigestSignInit(md_ctx, &pctx, md, NULL, pkey) <= 0) {
                 EVP_MD_CTX_free(md_ctx);
@@ -2914,7 +2861,6 @@ ngx_tcp_lurk_cert_verify(ngx_tcp_session_t *s)
     }
 
     if (EVP_DigestSignInit(mctx, &pctx, md, NULL, pkey) <= 0) {
-        // todo
         (void) ngx_atomic_fetch_add(ngx_lurk_fail_cert_verify, 1);
         EVP_MD_CTX_free(mctx);
         return NGX_ERROR;
@@ -4066,11 +4012,4 @@ ngx_tcp_lurk_shm_find_key(ngx_rbtree_t *key_tree, const uint8_t *key_id)
 
     /* not found */
     return NULL;
-}
-
-
-static ngx_int_t
-ngx_tcp_lurk_init_module(ngx_cycle_t *cf)
-{
-    return NGX_OK;
 }
