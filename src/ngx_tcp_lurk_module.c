@@ -1816,6 +1816,8 @@ ngx_tcp_lurk_get_pkey_id(EVP_PKEY *pkey, uint8_t *key_id)
         return NGX_ERROR;
     }
 
+    hex = NULL;
+
     switch (EVP_PKEY_id(pkey)) {
 
     case EVP_PKEY_RSA:
@@ -1827,6 +1829,8 @@ ngx_tcp_lurk_get_pkey_id(EVP_PKEY *pkey, uint8_t *key_id)
         RSA_get0_key(rsa, &n, NULL, NULL);
 
         hex = BN_bn2hex(n);
+
+        RSA_free(rsa);
 
         hex_len = ngx_strlen(hex);
         for (p = (u_char *)hex; hex_len; hex_len--) {
@@ -1843,11 +1847,13 @@ ngx_tcp_lurk_get_pkey_id(EVP_PKEY *pkey, uint8_t *key_id)
 
         ec_pub_key = EC_KEY_get0_public_key(ec_key);
         if (ec_pub_key == NULL) {
+            EC_KEY_free(ec_key);
             return NGX_ERROR;
         }
 
         group = EC_KEY_get0_group(ec_key);
         if (group == NULL) {
+            EC_KEY_free(ec_key);
             return NGX_ERROR;
         }
 
@@ -1859,12 +1865,14 @@ ngx_tcp_lurk_get_pkey_id(EVP_PKEY *pkey, uint8_t *key_id)
             buf_len = EC_POINT_point2buf(group, ec_pub_key,
                                          EC_KEY_get_conv_form(ec_key), &buf, NULL);
             if (buf_len == 0) {
+                EC_KEY_free(ec_key);
                 return NGX_ERROR;
             }
 
             hex = OPENSSL_malloc(buf_len * 2 + 1);
             if (hex == NULL) {
                 OPENSSL_free(buf);
+                EC_KEY_free(ec_key);
                 return NGX_ERROR;
             }
 
@@ -1875,6 +1883,8 @@ ngx_tcp_lurk_get_pkey_id(EVP_PKEY *pkey, uint8_t *key_id)
 
             OPENSSL_free(buf);
         }
+
+        EC_KEY_free(ec_key);
 
         break;
     default:
@@ -2346,7 +2356,7 @@ ngx_tcp_lurk_rsa_extended_master(ngx_tcp_session_t *s)
     pkey_type = EVP_PKEY_id(pkey);
     if (pkey_type == EVP_PKEY_RSA) {
         ret = RSA_private_decrypt(enpms.len, enpms.data, decrypt_res.data,
-                    EVP_PKEY_get1_RSA(pkey), RSA_NO_PADDING);
+                    (RSA *)EVP_PKEY_get0_RSA(pkey), RSA_NO_PADDING);
 
         if (ret == -1 || ret > ctx->pkey_size) {
             error = ERR_get_error();
@@ -2470,25 +2480,25 @@ ngx_tcp_lurk_rsa_extended_master(ngx_tcp_session_t *s)
 static ngx_int_t
 ngx_tcp_lurk_ecdhe(ngx_tcp_session_t *s)
 {
-    int                                 j, num, pkey_type;
-    uint8_t                             rsa_pss = 0;
-    ngx_str_t                           key_str, dec_str, enc_str;
-    u_char                             *ecdhe_params_start, *ecdhe_params_end;
-    int16_t                             sig_id, md_id;
-    uint16_t                           *len;
-    EVP_PKEY                           *pkey;
-    u_char                             *sign;
-    size_t                              siglen;
-    unsigned int                        i, sign_len;
-    const EVP_MD                       *md = NULL;
-    u_char                             *q;
-    u_char                              md_buf[MD5_DIGEST_LENGTH+SHA_DIGEST_LENGTH];
-    ngx_tcp_lurk_ctx_t                 *ctx;
-    ngx_lurk_tls_ecdhe_input_payload_t *ecdhe;
-    ngx_str_t                           private_key_str;
-    EVP_MD_CTX                         *md_ctx = EVP_MD_CTX_new();
-    EVP_PKEY_CTX                       *pctx = NULL;
+    int                                  j, num, pkey_type;
+    u_char                              *ecdhe_params_start, *ecdhe_params_end;
+    u_char                              *q, *sign;
+    size_t                               siglen;
+    int16_t                              sig_id, md_id;
+    uint8_t                              rsa_pss = 0;
+    EVP_PKEY                            *pkey;
+    uint16_t                            *len;
+    ngx_str_t                            key_str, dec_str, enc_str;
+    ngx_str_t                            private_key_str;
+    unsigned int                         i, sign_len;
+    const EVP_MD                        *md = NULL;
+    EVP_MD_CTX                          *md_ctx;
+    EVP_PKEY_CTX                        *pctx = NULL;
+    ngx_tcp_lurk_ctx_t                  *ctx;
+    ngx_lurk_tls_ecdhe_input_payload_t  *ecdhe;
+    u_char                               md_buf[MD5_DIGEST_LENGTH+SHA_DIGEST_LENGTH];
 
+    md_ctx = EVP_MD_CTX_new();
     if (md_ctx == NULL) {
         return NGX_ERROR;
     }
@@ -2588,6 +2598,7 @@ ngx_tcp_lurk_ecdhe(ngx_tcp_session_t *s)
                                ERR_error_string(ERR_peek_last_error(), NULL));
             ctx->err = NGX_LURK_RESPONSE_ERROR_INTERNAL;
             (void) ngx_atomic_fetch_add(ngx_lurk_fail_sign, 1);
+            EVP_MD_CTX_free(md_ctx);
             return NGX_ERROR;
         }
 
@@ -2618,6 +2629,7 @@ ngx_tcp_lurk_ecdhe(ngx_tcp_session_t *s)
                                &ctx->servername, &ctx->ip_text, md_id);
             ctx->err = NGX_LURK_RESPONSE_ERROR_INTERNAL;
             (void) ngx_atomic_fetch_add(ngx_lurk_fail_sign, 1);
+            EVP_MD_CTX_free(md_ctx);
             return NGX_ERROR;
         }
 
@@ -2625,6 +2637,7 @@ ngx_tcp_lurk_ecdhe(ngx_tcp_session_t *s)
 
         if (rsa_pss) {
             if (EVP_DigestSignInit(md_ctx, &pctx, md, NULL, pkey) <= 0) {
+                EVP_MD_CTX_free(md_ctx);
                 return NGX_ERROR;
             }
 
@@ -2633,6 +2646,7 @@ ngx_tcp_lurk_ecdhe(ngx_tcp_session_t *s)
                 || EVP_PKEY_CTX_set_rsa_pss_saltlen(pctx,
                                                 RSA_PSS_SALTLEN_DIGEST) <= 0)
             {
+                EVP_MD_CTX_free(md_ctx);
                 return NGX_ERROR;
             }
 
@@ -2650,6 +2664,7 @@ ngx_tcp_lurk_ecdhe(ngx_tcp_session_t *s)
                                    ERR_error_string(ERR_peek_last_error(), NULL));
                 ctx->err = NGX_LURK_RESPONSE_ERROR_INTERNAL;
                 (void) ngx_atomic_fetch_add(ngx_lurk_fail_sign, 1);
+                EVP_MD_CTX_free(md_ctx);
                 return NGX_ERROR;
             }
 
@@ -2660,6 +2675,7 @@ ngx_tcp_lurk_ecdhe(ngx_tcp_session_t *s)
                                    ERR_error_string(ERR_peek_last_error(), NULL));
                 ctx->err = NGX_LURK_RESPONSE_ERROR_INTERNAL;
                 (void) ngx_atomic_fetch_add(ngx_lurk_fail_sign, 1);
+                EVP_MD_CTX_free(md_ctx);
                 return NGX_ERROR;
             }
 
@@ -2684,6 +2700,7 @@ ngx_tcp_lurk_ecdhe(ngx_tcp_session_t *s)
                                ERR_error_string(ERR_peek_last_error(), NULL));
             ctx->err = NGX_LURK_RESPONSE_ERROR_INTERNAL;
             (void) ngx_atomic_fetch_add(ngx_lurk_fail_sign, 1);
+            EVP_MD_CTX_free(md_ctx);
             return NGX_ERROR;
         }
 
@@ -2899,6 +2916,7 @@ ngx_tcp_lurk_cert_verify(ngx_tcp_session_t *s)
     if (EVP_DigestSignInit(mctx, &pctx, md, NULL, pkey) <= 0) {
         // todo
         (void) ngx_atomic_fetch_add(ngx_lurk_fail_cert_verify, 1);
+        EVP_MD_CTX_free(mctx);
         return NGX_ERROR;
     }
 
@@ -2911,6 +2929,7 @@ ngx_tcp_lurk_cert_verify(ngx_tcp_session_t *s)
                                "[sni:%V][client_ip:%V]rsa padding fail error %s",
                                &ctx->servername, &ctx->ip_text, ERR_error_string(ERR_peek_last_error(), NULL));
             (void) ngx_atomic_fetch_add(ngx_lurk_fail_cert_verify, 1);
+            EVP_MD_CTX_free(mctx);
             return NGX_ERROR;
         }
     }
@@ -2921,6 +2940,7 @@ ngx_tcp_lurk_cert_verify(ngx_tcp_session_t *s)
                            "[sni:%V][client_ip:%V]SSLv3 cert verify not supported",
                            &ctx->servername, &ctx->ip_text);
         (void) ngx_atomic_fetch_add(ngx_lurk_fail_cert_verify, 1);
+        EVP_MD_CTX_free(mctx);
         return NGX_ERROR;
     }
 
@@ -2929,8 +2949,11 @@ ngx_tcp_lurk_cert_verify(ngx_tcp_session_t *s)
                            "[sni:%V][client_ip:%V]digest sign fail error %s",
                            &ctx->servername, &ctx->ip_text, ERR_error_string(ERR_peek_last_error(), NULL));
         (void) ngx_atomic_fetch_add(ngx_lurk_fail_cert_verify, 1);
+        EVP_MD_CTX_free(mctx);
         return NGX_ERROR;
     }
+
+    EVP_MD_CTX_free(mctx);
 
     *len = htons(siglen);
     ctx->buf->body.last += sizeof(uint16_t);
