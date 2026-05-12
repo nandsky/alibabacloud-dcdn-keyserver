@@ -1754,18 +1754,21 @@ ngx_tcp_lurk_get_pkey_id(EVP_PKEY *pkey, uint8_t *key_id)
 {
     RSA             *rsa;
     char            *hex;
-    size_t           hex_len;
-    u_char          *p;
+    size_t           hex_len, buf_len;
+    u_char          *p, *buf;
     EC_KEY          *ec_key;
+    EVP_MD_CTX      *ctx;
+    const BIGNUM    *n;
     const EC_POINT  *ec_pub_key;
     const EC_GROUP  *group;
-    const BIGNUM    *n = NULL;
 
     if (pkey == NULL || key_id == NULL) {
         return NGX_ERROR;
     }
 
     hex = NULL;
+    buf = NULL;
+    n = NULL;
 
     switch (EVP_PKEY_id(pkey)) {
 
@@ -1788,6 +1791,7 @@ ngx_tcp_lurk_get_pkey_id(EVP_PKEY *pkey, uint8_t *key_id)
         }
 
         break;
+
     case EVP_PKEY_EC:
         ec_key = EVP_PKEY_get1_EC_KEY(pkey);
         if (ec_key == NULL) {
@@ -1806,33 +1810,25 @@ ngx_tcp_lurk_get_pkey_id(EVP_PKEY *pkey, uint8_t *key_id)
             return NGX_ERROR;
         }
 
-        {
-            uint8_t *buf = NULL;
-            size_t   buf_len;
-            size_t   i;
-
-            buf_len = EC_POINT_point2buf(group, ec_pub_key,
-                                         EC_KEY_get_conv_form(ec_key), &buf, NULL);
-            if (buf_len == 0) {
-                EC_KEY_free(ec_key);
-                return NGX_ERROR;
-            }
-
-            hex = OPENSSL_malloc(buf_len * 2 + 1);
-            if (hex == NULL) {
-                OPENSSL_free(buf);
-                EC_KEY_free(ec_key);
-                return NGX_ERROR;
-            }
-
-            for (i = 0; i < buf_len; i++) {
-                ngx_snprintf((u_char *)hex + i * 2, 3, "%02X", buf[i]);
-            }
-            hex[buf_len * 2] = '\0';
-
-            OPENSSL_free(buf);
+        buf_len = EC_POINT_point2buf(group, ec_pub_key,
+                                     EC_KEY_get_conv_form(ec_key), &buf, NULL);
+        if (buf_len == 0) {
+            EC_KEY_free(ec_key);
+            return NGX_ERROR;
         }
 
+        hex = OPENSSL_malloc(buf_len * 2 + 1);
+        if (hex == NULL) {
+            OPENSSL_free(buf);
+            EC_KEY_free(ec_key);
+            return NGX_ERROR;
+        }
+
+        ngx_snprintf((u_char *)hex, buf_len * 2, "%*Xs", buf_len, buf);
+
+        hex[buf_len * 2] = '\0';
+
+        OPENSSL_free(buf);
         EC_KEY_free(ec_key);
 
         break;
@@ -1844,7 +1840,12 @@ ngx_tcp_lurk_get_pkey_id(EVP_PKEY *pkey, uint8_t *key_id)
         return NGX_ERROR;
     }
 
-    EVP_MD_CTX *ctx = EVP_MD_CTX_create();
+    ctx = EVP_MD_CTX_create();
+    if (ctx == NULL) {
+        OPENSSL_free(hex);
+        return NGX_ERROR;
+    }
+
     EVP_DigestInit_ex(ctx, EVP_sha256(), 0);
     EVP_DigestUpdate(ctx, hex, ngx_strlen(hex));
     EVP_DigestFinal_ex(ctx, key_id, 0);
