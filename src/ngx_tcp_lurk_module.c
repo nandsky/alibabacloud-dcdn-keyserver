@@ -1846,9 +1846,15 @@ ngx_tcp_lurk_get_pkey_id(EVP_PKEY *pkey, uint8_t *key_id)
         return NGX_ERROR;
     }
 
-    EVP_DigestInit_ex(ctx, EVP_sha256(), 0);
-    EVP_DigestUpdate(ctx, hex, ngx_strlen(hex));
-    EVP_DigestFinal_ex(ctx, key_id, 0);
+    if (EVP_DigestInit_ex(ctx, EVP_sha256(), 0) <= 0
+        || EVP_DigestUpdate(ctx, hex, ngx_strlen(hex)) <= 0
+        || EVP_DigestFinal_ex(ctx, key_id, 0) <= 0)
+    {
+        EVP_MD_CTX_destroy(ctx);
+        OPENSSL_free(hex);
+        return NGX_ERROR;
+    }
+
     EVP_MD_CTX_destroy(ctx);
 
     OPENSSL_free(hex);
@@ -1921,6 +1927,10 @@ ngx_tcp_lurk_buf_init(ngx_tcp_session_t *s)
     ngx_tcp_lurk_buf_t  *buf;
 
     ctx = ngx_tcp_get_module_ctx(s, ngx_tcp_lurk_module);
+
+    if (ctx->evp_pkey == NULL) {
+        return NGX_ERROR;
+    }
 
     ctx->pkey_size = EVP_PKEY_size(ctx->evp_pkey);
 
@@ -2015,6 +2025,8 @@ ngx_tcp_lurk_rsa_master(ngx_tcp_session_t *s)
         if (ctx->evp_pkey == NULL) {
             ngx_lurk_log_error(NGX_LOG_ERR, s->connection->log, ngx_errno,
                                "[sni:%V] pkey load client key failed", &ctx->servername);
+            ctx->err = NGX_LURK_RESPONSE_UNVALID_KEY_PAIR_ID;
+            return NGX_ERROR;
         }
     }
 
@@ -2114,7 +2126,23 @@ ngx_tcp_lurk_rsa_master(ngx_tcp_session_t *s)
 
     } else if (pkey_type == EVP_PKEY_EC) {
         const EC_KEY *ec = EVP_PKEY_get0_EC_KEY(pkey);
+        if (ec == NULL) {
+            ngx_lurk_log_error(NGX_LOG_ERR, s->connection->log, 0,
+                               "[sni:%V][client_ip:%V]EC key get failed",
+                               &ctx->servername, &ctx->ip_text);
+            ctx->err = NGX_LURK_RESPONSE_ERROR_INTERNAL;
+            (void) ngx_atomic_fetch_add(ngx_lurk_fail_master_secret, 1);
+            return NGX_ERROR;
+        }
         group = EC_KEY_get0_group(ec);
+        if (group == NULL) {
+            ngx_lurk_log_error(NGX_LOG_ERR, s->connection->log, 0,
+                               "[sni:%V][client_ip:%V]EC group get failed",
+                               &ctx->servername, &ctx->ip_text);
+            ctx->err = NGX_LURK_RESPONSE_ERROR_INTERNAL;
+            (void) ngx_atomic_fetch_add(ngx_lurk_fail_master_secret, 1);
+            return NGX_ERROR;
+        }
 
         ec_point = EC_POINT_new(group);
         if (ec_point == NULL) {
@@ -2242,6 +2270,8 @@ ngx_tcp_lurk_rsa_extended_master(ngx_tcp_session_t *s)
         if (ctx->evp_pkey == NULL) {
             ngx_lurk_log_error(NGX_LOG_ERR, s->connection->log, ngx_errno,
                                "[sni:%V] pkey load client key failed", &ctx->servername);
+            ctx->err = NGX_LURK_RESPONSE_UNVALID_KEY_PAIR_ID;
+            return NGX_ERROR;
         }
     }
 
@@ -2338,7 +2368,23 @@ ngx_tcp_lurk_rsa_extended_master(ngx_tcp_session_t *s)
 
     } else if (pkey_type == EVP_PKEY_EC) {
         const EC_KEY *ec = EVP_PKEY_get0_EC_KEY(pkey);
+        if (ec == NULL) {
+            ngx_lurk_log_error(NGX_LOG_ERR, s->connection->log, 0,
+                               "[sni:%V][client_ip:%V]EC key get failed",
+                               &ctx->servername, &ctx->ip_text);
+            ctx->err = NGX_LURK_RESPONSE_ERROR_INTERNAL;
+            (void) ngx_atomic_fetch_add(ngx_lurk_fail_master_secret, 1);
+            return NGX_ERROR;
+        }
         group = EC_KEY_get0_group(ec);
+        if (group == NULL) {
+            ngx_lurk_log_error(NGX_LOG_ERR, s->connection->log, 0,
+                               "[sni:%V][client_ip:%V]EC group get failed",
+                               &ctx->servername, &ctx->ip_text);
+            ctx->err = NGX_LURK_RESPONSE_ERROR_INTERNAL;
+            (void) ngx_atomic_fetch_add(ngx_lurk_fail_master_secret, 1);
+            return NGX_ERROR;
+        }
 
         ec_point = EC_POINT_new(group);
         if (ec_point == NULL) {
@@ -2486,6 +2532,8 @@ ngx_tcp_lurk_ecdhe(ngx_tcp_session_t *s)
         if (ctx->evp_pkey == NULL) {
             ngx_lurk_log_error(NGX_LOG_ERR, s->connection->log, ngx_errno,
                                "[sni:%V] pkey load client key failed", &ctx->servername);
+            ctx->err = NGX_LURK_RESPONSE_UNVALID_KEY_PAIR_ID;
+            return NGX_ERROR;
         }
     }
 
@@ -2523,15 +2571,24 @@ ngx_tcp_lurk_ecdhe(ngx_tcp_session_t *s)
         for (num = 2; num > 0; num--) {
 
             EVP_MD_CTX_set_flags(md_ctx, EVP_MD_CTX_FLAG_NON_FIPS_ALLOW);
-            EVP_DigestInit_ex(md_ctx, (num == 2) ? EVP_md5() : EVP_sha1(),
-                              NULL);
-            EVP_DigestUpdate(md_ctx, &ecdhe->client_random[0],
-                             SSL3_RANDOM_SIZE);
-            EVP_DigestUpdate(md_ctx, &ecdhe->edge_server_random[0],
-                             SSL3_RANDOM_SIZE);
-            EVP_DigestUpdate(md_ctx, ecdhe_params_start,
-                             ecdhe_params_end - ecdhe_params_start);
-            EVP_DigestFinal_ex(md_ctx, q, (unsigned int *)&i);
+            if (EVP_DigestInit_ex(md_ctx, (num == 2) ? EVP_md5() : EVP_sha1(),
+                                  NULL) <= 0
+                || EVP_DigestUpdate(md_ctx, &ecdhe->client_random[0],
+                                    SSL3_RANDOM_SIZE) <= 0
+                || EVP_DigestUpdate(md_ctx, &ecdhe->edge_server_random[0],
+                                    SSL3_RANDOM_SIZE) <= 0
+                || EVP_DigestUpdate(md_ctx, ecdhe_params_start,
+                                    ecdhe_params_end - ecdhe_params_start) <= 0
+                || EVP_DigestFinal_ex(md_ctx, q, (unsigned int *)&i) <= 0)
+            {
+                ngx_lurk_log_error(NGX_LOG_ERR, s->connection->log, 0,
+                                   "[sni:%V][client_ip:%V]digest error",
+                                   &ctx->servername, &ctx->ip_text);
+                ctx->err = NGX_LURK_RESPONSE_ERROR_INTERNAL;
+                (void) ngx_atomic_fetch_add(ngx_lurk_fail_sign, 1);
+                EVP_MD_CTX_free(md_ctx);
+                return NGX_ERROR;
+            }
 
             q += i;
             j += i;
@@ -2632,14 +2689,22 @@ ngx_tcp_lurk_ecdhe(ngx_tcp_session_t *s)
             goto end;
         }
 
-        EVP_DigestInit_ex(md_ctx, md, NULL);
-
-        EVP_DigestUpdate(md_ctx, &ecdhe->client_random[0],
-                         SSL3_RANDOM_SIZE);
-        EVP_DigestUpdate(md_ctx, &ecdhe->edge_server_random[0],
-                         SSL3_RANDOM_SIZE);
-        EVP_DigestUpdate(md_ctx, ecdhe_params_start,
-                         ecdhe_params_end - ecdhe_params_start);
+        if (EVP_DigestInit_ex(md_ctx, md, NULL) <= 0
+            || EVP_DigestUpdate(md_ctx, &ecdhe->client_random[0],
+                                SSL3_RANDOM_SIZE) <= 0
+            || EVP_DigestUpdate(md_ctx, &ecdhe->edge_server_random[0],
+                                SSL3_RANDOM_SIZE) <= 0
+            || EVP_DigestUpdate(md_ctx, ecdhe_params_start,
+                                ecdhe_params_end - ecdhe_params_start) <= 0)
+        {
+            ngx_lurk_log_error(NGX_LOG_ERR, s->connection->log, 0,
+                               "[sni:%V][client_ip:%V]digest error",
+                               &ctx->servername, &ctx->ip_text);
+            ctx->err = NGX_LURK_RESPONSE_ERROR_INTERNAL;
+            (void) ngx_atomic_fetch_add(ngx_lurk_fail_sign, 1);
+            EVP_MD_CTX_free(md_ctx);
+            return NGX_ERROR;
+        }
 
         if (!EVP_SignFinal(md_ctx, sign, &sign_len, pkey)) {
             ngx_lurk_log_error(NGX_LOG_ERR, s->connection->log, 0,
@@ -2685,7 +2750,7 @@ end:
 }
 
 
-static void
+static ngx_int_t
 tls1_lookup_get_sig_and_md(uint16_t sigalg, int *psig, const EVP_MD **pmd)
 {
     const EVP_MD *md = NULL;
@@ -2773,6 +2838,8 @@ tls1_lookup_get_sig_and_md(uint16_t sigalg, int *psig, const EVP_MD **pmd)
     if (pmd) {
         *pmd = md;
     }
+
+    return (sig != -1) ? NGX_OK : NGX_ERROR;
 }
 
 
@@ -2847,7 +2914,13 @@ ngx_tcp_lurk_cert_verify(ngx_tcp_session_t *s)
         (void)ngx_ssl_lurk_decrypt(&key_str, &hdata, &hdata);
     }
 
-    tls1_lookup_get_sig_and_md(verfiy->signature_scheme, &rsig, &md);
+    if (tls1_lookup_get_sig_and_md(verfiy->signature_scheme, &rsig, &md) != NGX_OK) {
+        ngx_lurk_log_error(NGX_LOG_ERR, s->connection->log, 0,
+                           "[sni:%V][client_ip:%V]unsupported signature scheme 0x%04Xd",
+                           &ctx->servername, &ctx->ip_text, verfiy->signature_scheme);
+        (void) ngx_atomic_fetch_add(ngx_lurk_fail_cert_verify, 1);
+        return NGX_ERROR;
+    }
 
     siglen = EVP_PKEY_size(pkey);
 
@@ -3287,7 +3360,14 @@ ngx_tcp_lurk_load_pkey(ngx_tree_ctx_t *ctx, ngx_str_t *name)
 
         pkey_size = RSA_size(rsa);
     } else if (pkey_type == EVP_PKEY_EC) {
-        pkey_size = ECDSA_size(EVP_PKEY_get0_EC_KEY(pkey));
+        const EC_KEY *ec = EVP_PKEY_get0_EC_KEY(pkey);
+        if (ec == NULL) {
+            ngx_log_error(NGX_LOG_EMERG, ctx->log, 0,
+                          "EC key missing for: %V", name);
+            EVP_PKEY_free(pkey);
+            goto out;
+        }
+        pkey_size = ECDSA_size(ec);
     } else {
         EVP_PKEY_free(pkey);
         goto out;
